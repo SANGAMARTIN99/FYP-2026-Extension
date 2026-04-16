@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AegisBrowse</title>
+    <script src="lib/gsap.min.js"></script>
+    <script src="lib/lucide.min.js"></script>
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body class="dark" id="app-body">
+
+    <!-- Background Animated Blobs -->
+    <div class="bg-shapes">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+    </div>
+
+    <!-- Main Container -->
+    <div class="container">
+
+        <!-- Header -->
+        <header class="header">
+            <div class="header-brand">
+                <i data-lucide="shield-check" class="icon-brand"></i>
+                <h1 class="brand-title" data-i18n="app_title">AegisBrowse</h1>
+            </div>
+            <div class="header-controls">
+                <button id="lang-toggle" class="ctrl-btn" title="Switch Language">
+                    <span id="lang-text">EN</span>
+                </button>
+                <button id="theme-toggle" class="ctrl-btn" title="Toggle Theme">
+                    <i data-lucide="moon" id="theme-icon"></i>
+                </button>
+            </div>
+        </header>
+
+        <!-- Stats Row -->
+        <div class="stats-row">
+            <div class="stat-card">
+                <p class="stat-label" data-i18n="nav_count">Navigations</p>
+                <h2 id="count-nav" class="stat-value">0</h2>
+            </div>
+            <div class="stat-card accent">
+                <p class="stat-label" data-i18n="req_count">Requests</p>
+                <h2 id="count-req" class="stat-value">0</h2>
+            </div>
+            <div class="stat-card">
+                <p class="stat-label" data-i18n="total_count">Total Logs</p>
+                <h2 id="count-total" class="stat-value">0</h2>
+            </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="tabs">
+            <button id="tab-dashboard" class="tab-btn active" data-tab="dashboard" data-i18n="tab_dashboard">Dashboard</button>
+            <button id="tab-feed" class="tab-btn" data-tab="feed" data-i18n="tab_feed">Activity Feed</button>
+        </div>
+
+        <!-- Dashboard View -->
+        <div id="view-dashboard" class="view active">
+            <div class="section-title">
+                <i data-lucide="activity"></i>
+                <span data-i18n="recent_activity">Recent Activity</span>
+            </div>
+            <div id="recent-list" class="recent-list">
+                <div class="empty-state" data-i18n="no_activity">No activity yet. Browse a little!</div>
+            </div>
+        </div>
+
+        <!-- Feed View -->
+        <div id="view-feed" class="view hidden">
+            <div id="feed-container" class="feed-container">
+                <div class="empty-state" data-i18n="no_activity">No activity yet. Browse a little!</div>
+            </div>
+            <!-- Pagination -->
+            <div class="pagination">
+                <button id="prev-page" class="page-btn" disabled>
+                    <i data-lucide="chevron-left"></i>
+                </button>
+                <span id="page-info" class="page-info">1 / 1</span>
+                <button id="next-page" class="page-btn" disabled>
+                    <i data-lucide="chevron-right"></i>
+                </button>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <span data-i18n="secure_status">● System Secure</span>
+        <span id="live-time">00:00:00</span>
+    </footer>
+
+    <script src="popup.js"></script>
+</body>
+</html>

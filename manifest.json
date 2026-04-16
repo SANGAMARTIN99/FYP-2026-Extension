@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "AegisBrowse",
+  "version": "1.0",
+  "description": "AegisBrowse is a browser activity tracker with real-time URL interception and GSAP-powered dashboard.",
+  "permissions": [
+    "webRequest",
+    "webNavigation",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "*://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "assets/icon16.png",
+      "48": "assets/icon48.png",
+      "128": "assets/icon128.png"
+    }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
+  "icons": {
+    "16": "assets/icon16.png",
+    "48": "assets/icon48.png",
+    "128": "assets/icon128.png"
+  }
+}
