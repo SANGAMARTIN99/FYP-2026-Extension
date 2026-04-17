@@ -260,6 +260,103 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (currentPage < total) { currentPage++; renderFeed(); }
     });
 
+    // --- ADMIN AUTH & TRACKING LOCK LOGIC ---
+    
+    const trackingToggle = $('#tracking-toggle');
+    const authOverlay = $('#auth-overlay');
+    const authCancel = $('#auth-cancel');
+    const authConfirm = $('#auth-confirm');
+    const adminPasswordInput = $('#admin-password');
+    const authError = $('#auth-error');
+    const statusText = $('#status-text');
+
+    // Load initial tracking state
+    const settings = await chrome.storage.local.get(['trackingEnabled']);
+    const isTracking = settings.trackingEnabled !== false;
+    trackingToggle.checked = isTracking;
+    updateStatusUI(isTracking);
+
+    function updateStatusUI(active) {
+        statusText.textContent = active ? 'Active & Encrypted' : 'Surveillance Paused';
+        statusText.style.color = active ? 'var(--accent-green)' : '#ef4444';
+        document.body.classList.toggle('tracking-off', !active);
+    }
+
+    trackingToggle.addEventListener('click', (e) => {
+        const currentlyActive = trackingToggle.checked;
+        
+        // If trying to turn OFF, intercept and ask for password
+        if (!currentlyActive) {
+            e.preventDefault(); // Stop the check from actually toggling
+            authOverlay.classList.remove('hidden');
+            adminPasswordInput.value = '';
+            adminPasswordInput.focus();
+            authError.classList.add('hidden');
+        } else {
+            // Turning ON is always allowed
+            saveTrackingState(true);
+        }
+    });
+
+    authCancel.addEventListener('click', () => {
+        authOverlay.classList.add('hidden');
+    });
+
+    authConfirm.addEventListener('click', async () => {
+        const password = adminPasswordInput.value;
+        if (!password) return;
+
+        authConfirm.disabled = true;
+        authConfirm.textContent = 'Verifying...';
+        authError.classList.add('hidden');
+
+        try {
+            // Validate via Backend Login Mutation
+            // We assume 'admin' as the primary account for this simple check
+            const query = `
+                mutation AdminVerify($password: String!) {
+                  tokenAuth(username: "admin", password: $password) {
+                    token
+                  }
+                }
+            `;
+
+            const response = await fetch("http://127.0.0.1:8000/graphql/", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query, variables: { password } })
+            });
+
+            const result = await response.json();
+
+            if (result.data?.tokenAuth?.token) {
+                // Success! Deactivate surveillance
+                saveTrackingState(false);
+                authOverlay.classList.add('hidden');
+            } else {
+                authError.classList.remove('hidden');
+            }
+        } catch (err) {
+            console.error("Auth Fail:", err);
+            authError.textContent = "Network error. Try again.";
+            authError.classList.remove('hidden');
+        } finally {
+            authConfirm.disabled = false;
+            authConfirm.textContent = 'Deactivate';
+        }
+    });
+
+    async function saveTrackingState(enabled) {
+        await chrome.storage.local.set({ trackingEnabled: enabled });
+        trackingToggle.checked = enabled;
+        updateStatusUI(enabled);
+        
+        // Notify background script to stop/start immediately
+        chrome.runtime.sendMessage({ type: 'STATUS_UPDATE', enabled });
+    }
+
+    // --- END AUTH LOGIC ---
+
     // Listen for new logs from background
     chrome.runtime.onMessage.addListener((msg) => {
         if (msg.type === 'NEW_LOG') {

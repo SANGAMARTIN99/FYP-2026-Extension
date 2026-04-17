@@ -19,6 +19,11 @@ const getChromeUser = async () => {
 
 // Helper to save logs
 const saveLog = async (logEntry) => {
+  const settings = await chrome.storage.local.get(['trackingEnabled']);
+  const trackingEnabled = settings.trackingEnabled !== false; // Default to true
+
+  if (!trackingEnabled) return;
+
   // Prevent infinite tracking loop of our own GraphQL backend endpoints
   if (logEntry.url && (logEntry.url.includes('127.0.0.1:8000') || logEntry.url.includes('localhost:8000'))) {
     return;
@@ -124,6 +129,13 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 // Capture URL Requests
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
+    // PULSE INTERCEPTION: Real-time sync trigger from Dashboard
+    if (details.url.includes('aegis-pulse.local')) {
+      console.log("AegisBrowse: Real-time pulse received! Syncing...");
+      syncBlockedDomains();
+      return; 
+    }
+
     // Ignore internal extension requests
     if (details.url.startsWith('chrome-extension://')) return;
 
@@ -145,6 +157,167 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
        url: tab.url,
        title: tab.title || 'Unknown Title'
      });
+  }
+});
+
+// --- NEW BLOCKING MECHANISM ---
+
+const updateBlockingRules = async (blockedData) => {
+  try {
+    const settings = await chrome.storage.local.get(['trackingEnabled']);
+    if (settings.trackingEnabled === false) {
+       // Surveillance is deactivated, remove all rules
+       const oldRules = await chrome.declarativeNetRequest.getDynamicRules();
+       await chrome.declarativeNetRequest.updateDynamicRules({
+         removeRuleIds: oldRules.map(r => r.id)
+       });
+       console.log("AegisBrowse: Surveillance OFF - Rules Cleared");
+       return;
+    }
+
+    const rules = blockedData.map((item, index) => ({
+      id: index + 100,
+      priority: 1,
+      action: { 
+        type: 'redirect', 
+        redirect: { 
+          url: chrome.runtime.getURL('blocked.html') + 
+               '?url=' + encodeURIComponent(item.domain) + 
+               '&reason=' + encodeURIComponent(item.reason || "Security Policy")
+        } 
+      },
+      condition: { 
+        urlFilter: `*://${item.domain}/*`, 
+        resourceTypes: ['main_frame'] 
+      }
+    }));
+
+    // Add www variants
+    const expandedRules = [...rules];
+    blockedData.forEach((item, index) => {
+      if (!item.domain.startsWith('www.')) {
+        expandedRules.push({
+          id: index + 1000,
+          priority: 1,
+          action: { 
+            type: 'redirect', 
+            redirect: { 
+              url: chrome.runtime.getURL('blocked.html') + 
+                   '?url=' + encodeURIComponent('www.' + item.domain) + 
+                   '&reason=' + encodeURIComponent(item.reason || "Security Policy")
+            } 
+          },
+          condition: { 
+            urlFilter: `*://www.${item.domain}/*`, 
+            resourceTypes: ['main_frame'] 
+          }
+        });
+      }
+    });
+
+    const oldRules = await chrome.declarativeNetRequest.getDynamicRules();
+    const oldIds = oldRules.map(r => r.id);
+
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: oldIds,
+      addRules: expandedRules
+    });
+    console.log("AegisBrowse: Enhanced Rules Updated", expandedRules.length);
+  } catch (err) {
+    console.error("AegisBrowse: Failed to update declarative rules:", err);
+  }
+};
+
+const syncBlockedDomains = async () => {
+  const query = `
+    query GetBlockedDomains {
+      allBlockedDomains {
+        domain
+        reason
+      }
+    }
+  `;
+  
+  const attemptSync = async (host) => {
+    const response = await fetch(`${host}/graphql/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query })
+    });
+    if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+    return await response.json();
+  };
+
+  try {
+    let result;
+    try {
+      result = await attemptSync("http://127.0.0.1:8000");
+    } catch (e) {
+      result = await attemptSync("http://localhost:8000");
+    }
+
+    if (result.data && result.data.allBlockedDomains) {
+      const blockedData = result.data.allBlockedDomains.map(d => ({
+        domain: d.domain.toLowerCase().trim(),
+        reason: d.reason
+      }));
+      await chrome.storage.local.set({ 
+        blockedData, 
+        blockedDomains: blockedData.map(d => d.domain) // For the backup navigation listener
+      });
+      console.log("AegisBrowse: Policy data updated", blockedData.length);
+      await updateBlockingRules(blockedData);
+    }
+  } catch (err) {
+    console.error("AegisBrowse: Fatal sync error:", err.message);
+  }
+};
+
+// Listen for alarms
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'syncBlockedDomains') {
+    syncBlockedDomains();
+  }
+});
+
+// Create alarm for periodic sync
+chrome.alarms.create('syncBlockedDomains', { periodInMinutes: 5 });
+
+// Initial sync
+syncBlockedDomains();
+
+// Domain blocking listener (Backup for declarativeNetRequest)
+chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
+  if (details.frameId !== 0) return; 
+
+  const { trackingEnabled, blockedDomains } = await chrome.storage.local.get(['trackingEnabled', 'blockedDomains']);
+  if (trackingEnabled === false) return; // Surveillance is deactivated
+  if (!blockedDomains || blockedDomains.length === 0) return;
+
+  try {
+    const url = new URL(details.url);
+    const hostname = url.hostname.toLowerCase();
+
+    const isBlocked = blockedDomains.some(domain => 
+      hostname === domain || hostname.endsWith('.' + domain)
+    );
+
+    if (isBlocked && !details.url.includes('blocked.html')) {
+      console.warn("AegisBrowse: Redirection active for:", details.url);
+      chrome.tabs.update(details.tabId, { 
+        url: chrome.runtime.getURL('blocked.html') + '?url=' + encodeURIComponent(details.url) 
+      });
+    }
+  } catch (e) {}
+});
+
+// Listen for messages from popup
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === 'STATUS_UPDATE') {
+    console.log("AegisBrowse: Status Changed to", msg.enabled);
+    chrome.storage.local.get(['blockedData'], ({ blockedData }) => {
+      updateBlockingRules(blockedData || []);
+    });
   }
 });
 
