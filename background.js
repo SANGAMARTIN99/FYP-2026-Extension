@@ -1,6 +1,30 @@
 const MAX_LOGS = 1000;
 
 let cachedUserEmail = null;
+let cachedDeviceId = null;
+
+const getDeviceId = async () => {
+  if (cachedDeviceId) return cachedDeviceId;
+  const result = await chrome.storage.local.get(['deviceId']);
+  if (result.deviceId) {
+    cachedDeviceId = result.deviceId;
+  } else {
+    // Generate a premium unique fingerprint
+    cachedDeviceId = 'Aegis-' + Math.random().toString(36).substr(2, 4).toUpperCase() + '-' + Date.now().toString(36).toUpperCase();
+    await chrome.storage.local.set({ deviceId: cachedDeviceId });
+  }
+  return cachedDeviceId;
+};
+
+const getDeviceName = async () => {
+  const result = await chrome.storage.local.get(['deviceName']);
+  if (result.deviceName) return result.deviceName;
+  
+  // Detect OS for a pretty default name
+  const platform = await chrome.runtime.getPlatformInfo();
+  const osName = platform.os.charAt(0).toUpperCase() + platform.os.slice(1);
+  return `${osName} Station`;
+};
 
 const getChromeUser = async () => {
   if (cachedUserEmail) return cachedUserEmail;
@@ -9,13 +33,14 @@ const getChromeUser = async () => {
     if (userInfo && userInfo.email) {
       cachedUserEmail = userInfo.email;
     } else {
-      cachedUserEmail = 'Anonymous Chrome User';
+      cachedUserEmail = 'Internal User';
     }
   } catch (e) {
-    cachedUserEmail = 'Anonymous Chrome User';
+    cachedUserEmail = 'Internal User';
   }
   return cachedUserEmail;
 };
+
 
 // Helper to save logs
 const saveLog = async (logEntry) => {
@@ -61,56 +86,111 @@ const saveLog = async (logEntry) => {
   });
 };
 
-const syncToDjango = async (logEntry) => {
-  const account = await getChromeUser();
-  const query = `
-    mutation RecordActivity($input: URLLogInput!) {
-      recordActivity(input: $input) {
-        success
+// --- RESILIENT BACKEND FETCH HELPER ---
+const fetchBackend = async (query, variables = {}) => {
+  const hosts = ["http://127.0.0.1:8000", "http://192.168.1.151:8000", "http://localhost:8000", "http://0.0.0.0:8000"];
+  
+  for (const host of hosts) {
+    try {
+      const response = await fetch(`${host}/graphql/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, variables })
+      });
+      
+      const result = await response.json();
+      
+      if (!response.ok) {
+        console.error(`AegisBrowse: Host ${host} returned status ${response.status}`, result);
+        continue;
       }
+      
+      if (result.errors) {
+        console.error(`AegisBrowse: GraphQL Errors from ${host}:`, JSON.stringify(result.errors, null, 2));
+        return result; 
+      }
+      
+      return result;
+    } catch (e) {
+      console.warn(`AegisBrowse: Host ${host} is unreachable. Error: ${e.message}`);
+      continue; 
+    }
+  }
+  throw new Error("AegisBrowse: Critical - All backend hosts unreachable or returning errors.");
+};
+
+const sendHeartbeat = async () => {
+  const settings = await chrome.storage.local.get(['trackingEnabled']);
+  if (settings.trackingEnabled === false) return;
+
+  const deviceId = await getDeviceId();
+  const deviceName = await getDeviceName();
+  const platform = await chrome.runtime.getPlatformInfo();
+  
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const activeTab = tabs[0] || {};
+
+  const query = `
+    mutation DeviceHeartbeat($input: HeartbeatInput!) {
+      heartbeat(input: $input) { success }
     }
   `;
 
-  // Extract domain fallback securely if title is missing
+  const account = await getChromeUser();
+  const variables = {
+    input: {
+      deviceId, deviceName,
+      osInfo: platform.os,
+      currentUrl: activeTab.url || "",
+      currentTitle: activeTab.title || "Idle",
+      chromeAccount: account
+    }
+  };
+
+  try {
+    await fetchBackend(query, variables);
+  } catch (err) {}
+};
+
+const syncToDjango = async (logEntry) => {
+  const account = await getChromeUser();
+  const deviceId = await getDeviceId();
+
+  const query = `
+    mutation RecordActivity($input: URLLogInput!) {
+      recordActivity(input: $input) { success }
+    }
+  `;
+
+  let status = "Safe";
+  if (logEntry.url && logEntry.url.includes('blocked.html')) status = "Blocked";
+
   let extractedTitle = logEntry.title || "Unknown Title";
   if (extractedTitle === "Unknown Title" || extractedTitle === "Page Navigation") {
     try {
       const urlObj = new URL(logEntry.url);
-      // E.g. "github.com" from "https://github.com/path"
       extractedTitle = urlObj.hostname.replace(/^www\./, '');
-      // Capitalize first letter
       extractedTitle = extractedTitle.charAt(0).toUpperCase() + extractedTitle.slice(1);
-    } catch(e) {
-      // Ignore URL parsing errors
-    }
+    } catch(e) {}
   }
 
-  // We group everything into URLLog for now
   const variables = {
     input: {
       url: logEntry.url || "unknown",
       title: extractedTitle,
       chromeAccount: account,
-      deviceMac: "Ext-Client-MAC-Hidden", // Browsers cannot native access MAC
-      activities: [
-        {
-          activityType: logEntry.type || "browser_event",
-          details: JSON.stringify(logEntry)
-        }
-      ]
+      deviceId, status,
+      activities: [{
+        activityType: logEntry.type || "browser_event",
+        details: JSON.stringify(logEntry)
+      }]
     }
   };
 
   try {
-    await fetch("http://127.0.0.1:8000/graphql/", {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ query, variables })
-    });
+    await fetchBackend(query, variables);
   } catch (err) {
-    console.error("Backend Sync Failed:", err);
+    console.error("AegisBrowse: Backend Sync Failed.");
   }
 };
 
@@ -160,6 +240,44 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
+// --- ENFORCEMENT ENGINE ---
+
+/**
+ * Scans all open tabs and redirects any that are now on a blocked domain.
+ * This ensures that when a policy is updated, existing sessions are terminated immediately.
+ */
+const enforcePolicyOnExistingTabs = async (blockedDomains) => {
+  if (!blockedDomains || blockedDomains.length === 0) return;
+
+  const settings = await chrome.storage.local.get(['trackingEnabled']);
+  if (settings.trackingEnabled === false) return;
+
+  console.log("AegisBrowse: Enforcing policy on existing tabs...");
+  
+  const tabs = await chrome.tabs.query({});
+  for (const tab of tabs) {
+    if (!tab.url || tab.url.includes('blocked.html')) continue;
+
+    try {
+      const url = new URL(tab.url);
+      const hostname = url.hostname.toLowerCase();
+
+      const isBlocked = blockedDomains.some(domain => 
+        hostname === domain || hostname.endsWith('.' + domain)
+      );
+
+      if (isBlocked) {
+        console.warn("AegisBrowse: Terminating existing session for:", tab.url);
+        chrome.tabs.update(tab.id, { 
+          url: chrome.runtime.getURL('blocked.html') + '?url=' + encodeURIComponent(tab.url) 
+        });
+      }
+    } catch (e) {
+      // URL parsing might fail for internal chrome:// pages, ignore them
+    }
+  }
+};
+
 // --- NEW BLOCKING MECHANISM ---
 
 const updateBlockingRules = async (blockedData) => {
@@ -187,48 +305,31 @@ const updateBlockingRules = async (blockedData) => {
         } 
       },
       condition: { 
-        urlFilter: `*://${item.domain}/*`, 
+        urlFilter: `||${item.domain}^`, 
         resourceTypes: ['main_frame'] 
       }
     }));
-
-    // Add www variants
-    const expandedRules = [...rules];
-    blockedData.forEach((item, index) => {
-      if (!item.domain.startsWith('www.')) {
-        expandedRules.push({
-          id: index + 1000,
-          priority: 1,
-          action: { 
-            type: 'redirect', 
-            redirect: { 
-              url: chrome.runtime.getURL('blocked.html') + 
-                   '?url=' + encodeURIComponent('www.' + item.domain) + 
-                   '&reason=' + encodeURIComponent(item.reason || "Security Policy")
-            } 
-          },
-          condition: { 
-            urlFilter: `*://www.${item.domain}/*`, 
-            resourceTypes: ['main_frame'] 
-          }
-        });
-      }
-    });
 
     const oldRules = await chrome.declarativeNetRequest.getDynamicRules();
     const oldIds = oldRules.map(r => r.id);
 
     await chrome.declarativeNetRequest.updateDynamicRules({
       removeRuleIds: oldIds,
-      addRules: expandedRules
+      addRules: rules
     });
-    console.log("AegisBrowse: Enhanced Rules Updated", expandedRules.length);
+    
+    console.log("AegisBrowse: Enhanced Rules Updated", rules.length);
+    
+    // ENFORCEMENT: Immediately scan existing tabs and redirect if they match the new policy
+    const blockedDomains = blockedData.map(d => d.domain);
+    enforcePolicyOnExistingTabs(blockedDomains);
+
   } catch (err) {
     console.error("AegisBrowse: Failed to update declarative rules:", err);
   }
 };
 
-const syncBlockedDomains = async () => {
+const syncBlockedDomains = async (retryCount = 0) => {
   const query = `
     query GetBlockedDomains {
       allBlockedDomains {
@@ -239,52 +340,80 @@ const syncBlockedDomains = async () => {
   `;
   
   const attemptSync = async (host) => {
-    const response = await fetch(`${host}/graphql/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query })
-    });
-    if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
-    return await response.json();
+    try {
+      const response = await fetch(`${host}/graphql/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query })
+      });
+      if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+      return await response.json();
+    } catch (e) {
+      throw e;
+    }
   };
 
   try {
     let result;
+    // Sequential fallback for different localhost aliases
     try {
       result = await attemptSync("http://127.0.0.1:8000");
     } catch (e) {
-      result = await attemptSync("http://localhost:8000");
+      try {
+        result = await attemptSync("http://192.168.1.151:8000");
+      } catch (e2) {
+        try {
+          result = await attemptSync("http://localhost:8000");
+        } catch (e3) {
+          result = await attemptSync("http://0.0.0.0:8000");
+        }
+      }
     }
 
-    if (result.data && result.data.allBlockedDomains) {
+    if (result && result.data && result.data.allBlockedDomains) {
       const blockedData = result.data.allBlockedDomains.map(d => ({
         domain: d.domain.toLowerCase().trim(),
         reason: d.reason
       }));
       await chrome.storage.local.set({ 
         blockedData, 
-        blockedDomains: blockedData.map(d => d.domain) // For the backup navigation listener
+        blockedDomains: blockedData.map(d => d.domain) 
       });
       console.log("AegisBrowse: Policy data updated", blockedData.length);
       await updateBlockingRules(blockedData);
     }
   } catch (err) {
-    console.error("AegisBrowse: Fatal sync error:", err.message);
+    if (retryCount < 5) {
+      const delay = Math.pow(2, retryCount) * 2000;
+      console.warn(`AegisBrowse: Connection failed. Retrying in ${delay/1000}s...`);
+      setTimeout(() => syncBlockedDomains(retryCount + 1), delay);
+    } else {
+      console.error("AegisBrowse: Sync failed permanently. Ensure backend is running.");
+    }
   }
 };
+
+// Initial delayed sync
+setTimeout(() => {
+  syncBlockedDomains();
+  sendHeartbeat();
+}, 2000);
 
 // Listen for alarms
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'syncBlockedDomains') {
     syncBlockedDomains();
   }
+  if (alarm.name === 'heartbeat') {
+    sendHeartbeat();
+  }
 });
 
-// Create alarm for periodic sync
+// Periodic sync every 5 minutes
 chrome.alarms.create('syncBlockedDomains', { periodInMinutes: 5 });
 
-// Initial sync
-syncBlockedDomains();
+// Heartbeat every 30 seconds
+chrome.alarms.create('heartbeat', { periodInMinutes: 0.5 });
 
 // Domain blocking listener (Backup for declarativeNetRequest)
 chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
