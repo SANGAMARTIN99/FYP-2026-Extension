@@ -6,23 +6,41 @@ const translations = {
         app_title:       'AegisBrowse',
         tab_dashboard:   'Dashboard',
         tab_feed:        'Activity Feed',
+        tab_link:        'Link Device',
         nav_count:       'Navigations',
         req_count:       'Requests',
         total_count:     'Total Logs',
         recent_activity: 'Recent Activity',
         secure_status:   '● System Secure',
-        no_activity:     'No activity yet. Browse a little!'
+        no_activity:     'No activity yet. Browse a little!',
+        link_title:      'Pair This Device',
+        link_sub:        'Enter the token from your AegisBrowse dashboard to link this browser to your account.',
+        link_placeholder:'Paste token here (xxxxxxxx-xxxx-...)',
+        link_save:       'Save & Pair',
+        link_clear:      'Unlink Device',
+        link_device_id:  'Device Fingerprint',
+        link_status_ok:  '✔ Device Linked',
+        link_status_no:  '✘ Not Linked'
     },
     SW: {
         app_title:       'AegisBrowse',
         tab_dashboard:   'Dashibodi',
         tab_feed:        'Mlisho',
+        tab_link:        'Unganisha Kifaa',
         nav_count:       'Urambazaji',
         req_count:       'Maombi',
         total_count:     'Jumla ya Kumbukumbu',
         recent_activity: 'Shughuli za Hivi Karibuni',
         secure_status:   '● Mfumo Salama',
-        no_activity:     'Hakuna shughuli bado. Vinjari kidogo!'
+        no_activity:     'Hakuna shughuli bado. Vinjari kidogo!',
+        link_title:      'Oanisha Kifaa Hiki',
+        link_sub:        'Weka tokeni kutoka dashibodi yako kuunganisha kivinjari hiki.',
+        link_placeholder:'Bandika tokeni hapa (xxxxxxxx-xxxx-...)',
+        link_save:       'Hifadhi & Oanisha',
+        link_clear:      'Ondoa Kifaa',
+        link_device_id:  'Alama ya Kifaa',
+        link_status_ok:  '✔ Kifaa Kimeunganishwa',
+        link_status_no:  '✘ Hakijaunganishwa'
     }
 };
 
@@ -366,4 +384,63 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (currentView === 'feed')      renderFeed();
         }
     });
+
+    // ─────────────────────────────────────
+    // LINK DEVICE (PAIRING TOKEN) PANEL
+    // ─────────────────────────────────────
+    const linkTokenInput  = $('#link-token-input');
+    const linkSaveBtn     = $('#link-save-btn');
+    const linkClearBtn    = $('#link-clear-btn');
+    const linkStatusEl    = $('#link-status');
+    const linkDeviceIdEl  = $('#link-device-id-value');
+
+    if (linkTokenInput && linkSaveBtn) {
+        // Populate device fingerprint
+        const deviceId = await getStoredDeviceId();
+        if (linkDeviceIdEl) linkDeviceIdEl.textContent = deviceId || '—';
+
+        // Load existing token
+        const stored = await chrome.storage.local.get(['pairingToken']);
+        if (stored.pairingToken) {
+            linkTokenInput.value = stored.pairingToken;
+            _setLinkStatus(true);
+        } else {
+            _setLinkStatus(false);
+        }
+
+        linkSaveBtn.addEventListener('click', async () => {
+            const val = linkTokenInput.value.trim();
+            if (!val) return;
+            // Basic UUID format check
+            const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            if (!uuidRe.test(val)) {
+                linkStatusEl.textContent = '⚠ Invalid token format';
+                linkStatusEl.style.color = '#f59e0b';
+                return;
+            }
+            await chrome.storage.local.set({ pairingToken: val });
+            // Invalidate cache in background
+            chrome.runtime.sendMessage({ type: 'TOKEN_UPDATED', token: val }).catch(() => {});
+            _setLinkStatus(true);
+            gsap.fromTo(linkSaveBtn, { scale: 0.95 }, { scale: 1, duration: 0.3, ease: 'back.out(2)' });
+        });
+
+        linkClearBtn.addEventListener('click', async () => {
+            await chrome.storage.local.remove(['pairingToken']);
+            linkTokenInput.value = '';
+            chrome.runtime.sendMessage({ type: 'TOKEN_UPDATED', token: null }).catch(() => {});
+            _setLinkStatus(false);
+        });
+    }
+
+    function _setLinkStatus(linked) {
+        if (!linkStatusEl) return;
+        linkStatusEl.textContent = linked ? t('link_status_ok') : t('link_status_no');
+        linkStatusEl.style.color = linked ? 'var(--accent-green)' : '#ef4444';
+    }
+
+    async function getStoredDeviceId() {
+        const r = await chrome.storage.local.get(['deviceId']);
+        return r.deviceId || null;
+    }
 });

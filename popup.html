@@ -56,6 +56,7 @@
         <div class="tabs">
             <button id="tab-dashboard" class="tab-btn active" data-tab="dashboard" data-i18n="tab_dashboard">Dashboard</button>
             <button id="tab-feed" class="tab-btn" data-tab="feed" data-i18n="tab_feed">Activity Feed</button>
+            <button id="tab-link" class="tab-btn" data-tab="link" data-i18n="tab_link">Link Device</button>
         </div>
 
         <!-- Dashboard View -->
@@ -83,6 +84,48 @@
                 <button id="next-page" class="page-btn" disabled>
                     <i data-lucide="chevron-right"></i>
                 </button>
+            </div>
+        </div>
+
+        <!-- Link Device View -->
+        <div id="view-link" class="view hidden">
+            <div class="link-panel">
+                <div class="link-header">
+                    <i data-lucide="link-2" class="link-icon"></i>
+                    <div>
+                        <h3 class="link-title" data-i18n="link_title">Pair This Device</h3>
+                        <p class="link-sub" data-i18n="link_sub">Enter the token from your AegisBrowse dashboard to link this browser to your account.</p>
+                    </div>
+                </div>
+
+                <!-- Device Fingerprint -->
+                <div class="link-field">
+                    <label class="link-label" data-i18n="link_device_id">Device Fingerprint</label>
+                    <div class="link-fingerprint" id="link-device-id-value">Loading...</div>
+                </div>
+
+                <!-- Token Input -->
+                <div class="link-field">
+                    <label class="link-label">Pairing Token</label>
+                    <input
+                        id="link-token-input"
+                        class="link-input"
+                        type="text"
+                        data-i18n-placeholder="link_placeholder"
+                        placeholder="Paste token here (xxxxxxxx-xxxx-...)"
+                        autocomplete="off"
+                        spellcheck="false"
+                    />
+                </div>
+
+                <!-- Status Badge -->
+                <div id="link-status" class="link-status">&#10007; Not Linked</div>
+
+                <!-- Actions -->
+                <div class="link-actions">
+                    <button id="link-save-btn" class="link-btn primary" data-i18n="link_save">Save &amp; Pair</button>
+                    <button id="link-clear-btn" class="link-btn danger" data-i18n="link_clear">Unlink Device</button>
+                </div>
             </div>
         </div>
 

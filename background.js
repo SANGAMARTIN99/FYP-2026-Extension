@@ -1,7 +1,8 @@
 const MAX_LOGS = 1000;
 
-let cachedUserEmail = null;
-let cachedDeviceId = null;
+let cachedUserEmail  = null;
+let cachedDeviceId   = null;
+let cachedPairingToken = null;
 
 const getDeviceId = async () => {
   if (cachedDeviceId) return cachedDeviceId;
@@ -9,11 +10,18 @@ const getDeviceId = async () => {
   if (result.deviceId) {
     cachedDeviceId = result.deviceId;
   } else {
-    // Generate a premium unique fingerprint
     cachedDeviceId = 'Aegis-' + Math.random().toString(36).substr(2, 4).toUpperCase() + '-' + Date.now().toString(36).toUpperCase();
     await chrome.storage.local.set({ deviceId: cachedDeviceId });
   }
   return cachedDeviceId;
+};
+
+/** Retrieve the pairing token the user saved in the popup. */
+const getPairingToken = async () => {
+  if (cachedPairingToken) return cachedPairingToken;
+  const result = await chrome.storage.local.get(['pairingToken']);
+  cachedPairingToken = result.pairingToken || null;
+  return cachedPairingToken;
 };
 
 const getDeviceName = async () => {
@@ -87,47 +95,66 @@ const saveLog = async (logEntry) => {
 };
 
 // --- RESILIENT BACKEND FETCH HELPER ---
-const fetchBackend = async (query, variables = {}) => {
-  const hosts = ["http://127.0.0.1:8000", "http://192.168.1.151:8000", "http://localhost:8000", "http://0.0.0.0:8000"];
-  
+const fetchBackend = async (query, variables = {}, timeoutMs = 5000) => {
+  const hosts = [
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+    "http://[::1]:8000",
+    "http://192.168.1.151:8000",
+    "http://0.0.0.0:8000"
+  ];
+  const pairingToken = await getPairingToken();
+  let lastError = null;
+
   for (const host of hosts) {
     try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (pairingToken) headers['X-Device-Token'] = pairingToken;
+
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), timeoutMs);
+
       const response = await fetch(`${host}/graphql/`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, variables })
+        headers,
+        body: JSON.stringify({ query, variables }),
+        signal: controller.signal
       });
-      
+      clearTimeout(id);
+
       const result = await response.json();
-      
+
       if (!response.ok) {
-        console.error(`AegisBrowse: Host ${host} returned status ${response.status}`, result);
+        console.warn(`AegisBrowse: Host ${host} reported HTTP ${response.status}`, result);
+        lastError = `HTTP ${response.status}`;
         continue;
       }
-      
+
       if (result.errors) {
-        console.error(`AegisBrowse: GraphQL Errors from ${host}:`, JSON.stringify(result.errors, null, 2));
+        console.warn(`AegisBrowse: GraphQL Errors from ${host}:`, JSON.stringify(result.errors, null, 2));
         return result; 
       }
-      
+
       return result;
     } catch (e) {
-      console.warn(`AegisBrowse: Host ${host} is unreachable. Error: ${e.message}`);
-      continue; 
+      lastError = e.message;
+      console.warn(`AegisBrowse: Connection to ${host} failed: ${e.message}`);
+      continue;
     }
   }
-  throw new Error("AegisBrowse: Critical - All backend hosts unreachable or returning errors.");
+  throw new Error(`Critical: All backend hosts unreachable. Last error: ${lastError}`);
 };
 
 const sendHeartbeat = async () => {
   const settings = await chrome.storage.local.get(['trackingEnabled']);
   if (settings.trackingEnabled === false) return;
 
-  const deviceId = await getDeviceId();
-  const deviceName = await getDeviceName();
-  const platform = await chrome.runtime.getPlatformInfo();
-  
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const deviceId     = await getDeviceId();
+  const deviceName   = await getDeviceName();
+  const platform     = await chrome.runtime.getPlatformInfo();
+  const pairingToken = await getPairingToken();
+
+  const tabs      = await chrome.tabs.query({ active: true, currentWindow: true });
   const activeTab = tabs[0] || {};
 
   const query = `
@@ -141,9 +168,10 @@ const sendHeartbeat = async () => {
     input: {
       deviceId, deviceName,
       osInfo: platform.os,
-      currentUrl: activeTab.url || "",
+      currentUrl:   activeTab.url   || "",
       currentTitle: activeTab.title || "Idle",
-      chromeAccount: account
+      chromeAccount: account,
+      pairingToken:  pairingToken   // ← links this device to the user on first heartbeat
     }
   };
 
@@ -153,8 +181,9 @@ const sendHeartbeat = async () => {
 };
 
 const syncToDjango = async (logEntry) => {
-  const account = await getChromeUser();
-  const deviceId = await getDeviceId();
+  const account      = await getChromeUser();
+  const deviceId     = await getDeviceId();
+  const pairingToken = await getPairingToken();
 
   const query = `
     mutation RecordActivity($input: URLLogInput!) {
@@ -176,10 +205,12 @@ const syncToDjango = async (logEntry) => {
 
   const variables = {
     input: {
-      url: logEntry.url || "unknown",
-      title: extractedTitle,
+      url:           logEntry.url || "unknown",
+      title:         extractedTitle,
       chromeAccount: account,
-      deviceId, status,
+      deviceId,
+      status,
+      pairingToken,  // ← ensures backend can link ownership even on activity records
       activities: [{
         activityType: logEntry.type || "browser_event",
         details: JSON.stringify(logEntry)
@@ -330,54 +361,29 @@ const updateBlockingRules = async (blockedData) => {
 };
 
 const syncBlockedDomains = async (retryCount = 0) => {
+  // The X-Device-Token header in fetchBackend tells the backend which user's
+  // domains to return — so this query is automatically per-user scoped.
   const query = `
     query GetBlockedDomains {
       allBlockedDomains {
+        id
         domain
         reason
       }
     }
   `;
-  
-  const attemptSync = async (host) => {
-    try {
-      const response = await fetch(`${host}/graphql/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query })
-      });
-      if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
-      return await response.json();
-    } catch (e) {
-      throw e;
-    }
-  };
 
   try {
-    let result;
-    // Sequential fallback for different localhost aliases
-    try {
-      result = await attemptSync("http://127.0.0.1:8000");
-    } catch (e) {
-      try {
-        result = await attemptSync("http://192.168.1.151:8000");
-      } catch (e2) {
-        try {
-          result = await attemptSync("http://localhost:8000");
-        } catch (e3) {
-          result = await attemptSync("http://0.0.0.0:8000");
-        }
-      }
-    }
+    const result = await fetchBackend(query);
 
     if (result && result.data && result.data.allBlockedDomains) {
       const blockedData = result.data.allBlockedDomains.map(d => ({
         domain: d.domain.toLowerCase().trim(),
         reason: d.reason
       }));
-      await chrome.storage.local.set({ 
-        blockedData, 
-        blockedDomains: blockedData.map(d => d.domain) 
+      await chrome.storage.local.set({
+        blockedData,
+        blockedDomains: blockedData.map(d => d.domain)
       });
       console.log("AegisBrowse: Policy data updated", blockedData.length);
       await updateBlockingRules(blockedData);
@@ -385,10 +391,11 @@ const syncBlockedDomains = async (retryCount = 0) => {
   } catch (err) {
     if (retryCount < 5) {
       const delay = Math.pow(2, retryCount) * 2000;
-      console.warn(`AegisBrowse: Connection failed. Retrying in ${delay/1000}s...`);
+      console.warn(`AegisBrowse: Policy sync failed (${err.message}). Retrying in ${delay/1000}s...`);
       setTimeout(() => syncBlockedDomains(retryCount + 1), delay);
     } else {
-      console.error("AegisBrowse: Sync failed permanently. Ensure backend is running.");
+      console.error("AegisBrowse: Sync failed permanently. Detailed Error:", err.message);
+      console.info("AegisBrowse: Action required -> Ensure your backend server is active at http://127.0.0.1:8000 and that your Pairing Token is valid.");
     }
   }
 };
@@ -447,6 +454,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     chrome.storage.local.get(['blockedData'], ({ blockedData }) => {
       updateBlockingRules(blockedData || []);
     });
+  }
+  if (msg.type === 'TOKEN_UPDATED') {
+    // Reset cached token so next heartbeat uses the new value
+    cachedPairingToken = msg.token || null;
+    console.log("AegisBrowse: Pairing token updated, triggering heartbeat...");
+    // Immediately send a heartbeat to claim the token
+    sendHeartbeat();
+    syncBlockedDomains();
   }
 });
 
