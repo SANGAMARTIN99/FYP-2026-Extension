@@ -62,8 +62,8 @@ const saveLog = async (logEntry) => {
     return;
   }
   
-  // Optional: Ignore extremely noisy automated assets if we only want actual URLs
-  if (logEntry.type === 'request' && !['main_frame', 'xmlhttprequest'].includes(logEntry.resourceType)) {
+  // Optional: Ignore noisy automated assets. ONLY track pure navigations and main requests.
+  if (logEntry.type === 'request' && logEntry.resourceType !== 'main_frame') {
     return;
   }
 
@@ -94,19 +94,22 @@ const saveLog = async (logEntry) => {
   });
 };
 
+let activeBackendHost = null;
+
 // --- RESILIENT BACKEND FETCH HELPER ---
 const fetchBackend = async (query, variables = {}, timeoutMs = 5000) => {
-  const hosts = [
-    "http://127.0.0.1:8000",
-    "http://localhost:8000",
-    "http://[::1]:8000",
-    "http://192.168.1.151:8000",
-    "http://0.0.0.0:8000"
-  ];
+  // If we found a working host, try it first
+  const hosts = activeBackendHost 
+    ? [activeBackendHost, "http://192.168.1.151:8000", "http://127.0.0.1:8000"] 
+    : ["http://192.168.1.151:8000", "http://127.0.0.1:8000", "http://localhost:8000"];
+  
+  // Remove duplicates
+  const uniqueHosts = [...new Set(hosts)];
+
   const pairingToken = await getPairingToken();
   let lastError = null;
 
-  for (const host of hosts) {
+  for (const host of uniqueHosts) {
     try {
       const headers = { 'Content-Type': 'application/json' };
       if (pairingToken) headers['X-Device-Token'] = pairingToken;
@@ -125,23 +128,28 @@ const fetchBackend = async (query, variables = {}, timeoutMs = 5000) => {
       const result = await response.json();
 
       if (!response.ok) {
-        console.warn(`AegisBrowse: Host ${host} reported HTTP ${response.status}`, result);
         lastError = `HTTP ${response.status}`;
         continue;
       }
 
       if (result.errors) {
+        // Still counts as a reachable host, just a bad GraphQL query
+        activeBackendHost = host;
         console.warn(`AegisBrowse: GraphQL Errors from ${host}:`, JSON.stringify(result.errors, null, 2));
         return result; 
       }
 
+      // Success! Cache this host so we don't ping dead ones anymore
+      activeBackendHost = host;
       return result;
     } catch (e) {
       lastError = e.message;
-      console.warn(`AegisBrowse: Connection to ${host} failed: ${e.message}`);
       continue;
     }
   }
+
+  // If we get here, all hosts failed. Clear the cache so we try from scratch next time
+  activeBackendHost = null;
   throw new Error(`Critical: All backend hosts unreachable. Last error: ${lastError}`);
 };
 
@@ -221,7 +229,7 @@ const syncToDjango = async (logEntry) => {
   try {
     await fetchBackend(query, variables);
   } catch (err) {
-    console.error("AegisBrowse: Backend Sync Failed.");
+    console.error("AegisBrowse: Backend Sync Failed. Details:", err.message);
   }
 };
 
@@ -301,7 +309,7 @@ const enforcePolicyOnExistingTabs = async (blockedDomains) => {
         console.warn("AegisBrowse: Terminating existing session for:", tab.url);
         chrome.tabs.update(tab.id, { 
           url: chrome.runtime.getURL('blocked.html') + '?url=' + encodeURIComponent(tab.url) 
-        });
+        }).catch(() => {});
       }
     } catch (e) {
       // URL parsing might fail for internal chrome:// pages, ignore them
