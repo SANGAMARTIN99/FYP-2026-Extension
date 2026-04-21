@@ -58,7 +58,7 @@ const saveLog = async (logEntry) => {
   if (!trackingEnabled) return;
 
   // Prevent infinite tracking loop of our own GraphQL backend endpoints
-  if (logEntry.url && (logEntry.url.includes('127.0.0.1:8000') || logEntry.url.includes('localhost:8000'))) {
+  if (logEntry.url && (logEntry.url.includes('127.0.0.1:8000') || logEntry.url.includes('localhost:8000') || logEntry.url.includes('192.168.1.245:8000'))) {
     return;
   }
   
@@ -100,8 +100,8 @@ let activeBackendHost = null;
 const fetchBackend = async (query, variables = {}, timeoutMs = 5000) => {
   // If we found a working host, try it first
   const hosts = activeBackendHost 
-    ? [activeBackendHost, "http://192.168.1.151:8000", "http://127.0.0.1:8000"] 
-    : ["http://192.168.1.151:8000", "http://127.0.0.1:8000", "http://localhost:8000"];
+    ? [activeBackendHost, "http://192.168.1.245:8000", "http://127.0.0.1:8000"] 
+    : ["http://192.168.1.245:8000", "http://127.0.0.1:8000", "http://localhost:8000"];
   
   // Remove duplicates
   const uniqueHosts = [...new Set(hosts)];
@@ -403,7 +403,7 @@ const syncBlockedDomains = async (retryCount = 0) => {
       setTimeout(() => syncBlockedDomains(retryCount + 1), delay);
     } else {
       console.error("AegisBrowse: Sync failed permanently. Detailed Error:", err.message);
-      console.info("AegisBrowse: Action required -> Ensure your backend server is active at http://127.0.0.1:8000 and that your Pairing Token is valid.");
+      console.info("AegisBrowse: Action required -> Ensure your backend server is active at http://192.168.1.245:8000 and that your Pairing Token is valid.");
     }
   }
 };
