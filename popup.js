@@ -339,7 +339,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
             `;
 
-            const response = await fetch("http://192.168.1.245:8000/graphql/", {
+            const response = await fetch("https://aegisbrowse.tarxemo.com/graphql/", {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ query, variables: { password } })
